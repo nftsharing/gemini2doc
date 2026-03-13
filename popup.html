@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Studio to DOCX</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 400px;
+      font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: #1f2329;
+    }
+    .container {
+      margin: 8px;
+      padding: 16px;
+      background: rgba(255,255,255,0.97);
+      border-radius: 12px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.18);
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 14px;
+      padding-bottom: 12px;
+      border-bottom: 2px solid #e8ecf1;
+    }
+    .header-icon {
+      width: 32px; height: 32px;
+      background: linear-gradient(135deg, #667eea, #764ba2);
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      color: #fff; font-weight: 900; font-size: 16px;
+    }
+    .header-text h1 {
+      font-size: 15px; font-weight: 700; color: #1a1a2e;
+    }
+    .header-text p {
+      font-size: 11px; color: #6b7280; margin-top: 2px;
+    }
+    .field { margin-bottom: 12px; }
+    .label {
+      font-size: 12px; font-weight: 600; color: #374151;
+      margin-bottom: 6px; display: block;
+    }
+    select {
+      width: 100%; padding: 9px 12px;
+      border: 1.5px solid #d1d5db; border-radius: 8px;
+      background: #fff; font-size: 12px;
+      color: #374151; outline: none;
+      transition: border-color 0.2s;
+    }
+    select:focus { border-color: #667eea; box-shadow: 0 0 0 3px rgba(102,126,234,0.15); }
+    .btn {
+      width: 100%; border: 0; border-radius: 10px;
+      padding: 11px 16px; font-size: 14px; font-weight: 700;
+      cursor: pointer; transition: all 0.25s;
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: #fff; box-shadow: 0 4px 14px rgba(102,126,234,0.35);
+    }
+    .btn-primary:hover:not(:disabled) {
+      transform: translateY(-1px); box-shadow: 0 6px 20px rgba(102,126,234,0.45);
+    }
+    .btn-primary:active:not(:disabled) { transform: translateY(0); }
+    .btn:disabled {
+      background: #94a3b8; cursor: not-allowed;
+      box-shadow: none; transform: none;
+    }
+    .status-bar {
+      margin-top: 10px; padding: 8px 12px;
+      border-radius: 8px; font-size: 12px;
+      line-height: 1.5; min-height: 20px;
+      white-space: pre-wrap; display: none;
+    }
+    .status-bar.show { display: block; }
+    .status-bar.info { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
+    .status-bar.success { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
+    .status-bar.error { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+    .status-bar.working { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; }
+    .spinner {
+      display: inline-block; width: 14px; height: 14px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: #fff; border-radius: 50%;
+      animation: spin 0.6s linear infinite; vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .footer {
+      text-align: center; font-size: 10px; color: #9ca3af;
+      margin-top: 8px; padding-top: 8px; border-top: 1px solid #f3f4f6;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="header-icon">D</div>
+      <div class="header-text">
+        <h1>AI Studio → DOCX</h1>
+        <p>导出对话内容为格式化文档</p>
+      </div>
+    </div>
+
+    <div class="field">
+      <label class="label" for="tabSelect">选择标签页</label>
+      <select id="tabSelect"></select>
+    </div>
+
+    <button class="btn btn-primary" id="exportBtn">
+      📄 导出 DOCX
+    </button>
+
+    <div id="status" class="status-bar"></div>
+
+    <div class="footer">v2.0 · 支持 AI Studio 对话格式保留</div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

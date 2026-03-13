@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "AI Studio to DOCX",
+  "version": "2.0.0",
+  "description": "将 AI Studio 对话内容导出为格式精美的 DOCX 文档",
+  "permissions": ["tabs", "scripting", "downloads", "activeTab"],
+  "host_permissions": ["<all_urls>"],
+  "action": {
+    "default_title": "AI Studio to DOCX",
+    "default_popup": "popup.html"
+  },
+  "icons": {}
+}
