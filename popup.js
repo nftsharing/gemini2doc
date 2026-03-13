@@ -31,9 +31,11 @@ function nowStamp() {
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
 }
 
-// ─── XML 转义 ──────────────────────────────────────────────────
+// ─── XML 转义 (增加对非法控制字符的拦截) ──────────────────────────
 function escXml(text) {
   return String(text ?? "")
+    // 移除 Word 不支持的控制字符 (\x00-\x08, \x0B, \x0C, \x0E-\x1F)
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -47,45 +49,9 @@ function escXml(text) {
 async function extractConversation() {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  // ── 1. 自动滚动以加载所有惰性内容 ──
-  const autoScroll = async () => {
-    // 寻找可能的滚动容器（AI Studio 有时使用 main 或专门的 scroll-container）
-    const scrollTargets = [document.scrollingElement];
-    const main = document.querySelector("main") || document.querySelector(".chat-container") || document.body;
-
-    // 查找具有过度滚动属性的所有容器
-    main.querySelectorAll("*").forEach((el) => {
-      try {
-        const s = getComputedStyle(el);
-        if ((s.overflowY === "auto" || s.overflowY === "scroll" || s.overflow === "auto") && el.scrollHeight > el.clientHeight + 10) {
-          scrollTargets.push(el);
-        }
-      } catch (_) { }
-    });
-
-    for (const sc of [...new Set(scrollTargets.filter(Boolean))]) {
-      let stable = 0, prevPos = -1;
-      for (let i = 0; i < 40; i++) { // 增加循环次数
-        const before = sc.scrollTop;
-        // 向下滚一个屏幕高度
-        sc.scrollTop += Math.max(500, Math.floor(sc.clientHeight * 0.9));
-        await sleep(150);
-
-        if (Math.abs(sc.scrollTop - before) < 5 || sc.scrollTop === prevPos) {
-          if (++stable >= 2) break;
-        } else stable = 0;
-        prevPos = sc.scrollTop;
-      }
-      // 滚回顶部，确保采集顺序
-      sc.scrollTop = 0;
-      await sleep(100);
-    }
-  };
-
-  // ── 2. 角色识别 ──
+  // ── 1. 角色识别 ──
   const normalizeRole = (raw, element) => {
     let v = String(raw || "").toLowerCase();
-    // 补补：如果属性里没写，通过类名或图标特征判断
     if (!v && element) {
       const cls = element.className || "";
       if (/user/i.test(cls) || element.querySelector(".user-avatar, .user-icon")) v = "user";
@@ -96,65 +62,54 @@ async function extractConversation() {
     return "";
   };
 
-  // ── 3. 递归解析 DOM 节点为结构化内容 ──
+  const isNoisy = (s) => {
+    const t = String(s || "").trim();
+    if (!t) return true;
+    const noisePatterns = [
+      /^(edit|more_vert|play_circle|menu|copy|share|delete|retry|thumb_up|thumb_down|expand_more|expand_less|content_copy|volume_up|stop_circle|add_circle)$/i,
+      /^\d{1,3}(,\d{3})*\s*tokens?$/i,
+      /^(复制|分享|重试|编辑|查看源文本|Good response|Bad response|Copy response)$/i,
+      /^Thinking\.\.\./i,
+      /^Sources$/i,
+      /^Google Search Suggestions$/i,
+      /Display of Search Suggestions is required/i,
+      /^(User|Model)\s*[•·]\s*\d{1,2}:\d{2}/i
+    ];
+    return noisePatterns.some(p => p.test(t));
+  };
+
   const parseDomToBlocks = (root) => {
-    const blocks = []; // 每个 block: { type, content, ... }
-
-    const isNoisy = (s) => {
-      const t = String(s || "").trim();
-      if (!t) return true;
-      // 排除常见的 UI 按钮文本和元数据
-      const noisePatterns = [
-        /^(edit|more_vert|play_circle|menu|copy|share|delete|retry|thumb_up|thumb_down|expand_more|expand_less|content_copy|volume_up|stop_circle|add_circle)$/i,
-        /^\d{1,3}(,\d{3})*\s*tokens?$/i,
-        /^(复制|分享|重试|编辑|查看源文本|Good response|Bad response|Copy response)$/i,
-        /^1\/\d+$/ // 翻页标记
-      ];
-      return noisePatterns.some(p => p.test(t));
-    };
-
+    const blocks = [];
     const walkInline = (node, inherited = {}) => {
-      /** 返回 [{text, bold, italic, code, link}] */
       const runs = [];
       if (!node) return runs;
-
       if (node.nodeType === Node.TEXT_NODE) {
         const t = (node.nodeValue || "").replace(/\u00A0/g, " ");
         if (t) runs.push({ text: t, ...inherited });
         return runs;
       }
       if (node.nodeType !== Node.ELEMENT_NODE) return runs;
-
       const tag = node.tagName?.toUpperCase() || "";
-      // 跳过噪音元素
       if (["BUTTON", "SVG", "MAT-ICON", "SCRIPT", "STYLE", "NAV"].includes(tag)) return runs;
       if (node.getAttribute("aria-hidden") === "true") return runs;
-
       const next = { ...inherited };
       if (tag === "STRONG" || tag === "B") next.bold = true;
       if (tag === "EM" || tag === "I") next.italic = true;
       if (tag === "CODE" && !["PRE"].includes(node.parentElement?.tagName?.toUpperCase())) next.code = true;
       if (tag === "A" && node.href) next.link = node.href;
-
-      for (const child of node.childNodes) {
-        runs.push(...walkInline(child, next));
-      }
+      for (const child of node.childNodes) runs.push(...walkInline(child, next));
       return runs;
     };
 
     const mergeRuns = (runs) => {
       const merged = [];
       for (const r of runs) {
-        const text = r.text || "";
-        if (!text) continue;
+        if (!r.text) continue;
         const prev = merged[merged.length - 1];
         if (prev && prev.bold === !!r.bold && prev.italic === !!r.italic && prev.code === !!r.code && prev.link === (r.link || undefined)) {
-          prev.text += text;
-        } else {
-          merged.push({ text, bold: !!r.bold, italic: !!r.italic, code: !!r.code, link: r.link || undefined });
-        }
+          prev.text += r.text;
+        } else merged.push({ ...r });
       }
-      // 移除前后空白但保留中间格式
       if (merged.length > 0) {
         merged[0].text = merged[0].text.replace(/^\s+/, "");
         merged[merged.length - 1].text = merged[merged.length - 1].text.replace(/\s+$/, "");
@@ -164,213 +119,175 @@ async function extractConversation() {
 
     const walkBlock = (container) => {
       if (!container) return;
-
       for (const node of container.childNodes) {
         if (node.nodeType === Node.TEXT_NODE) {
           const t = (node.nodeValue || "").trim();
-          if (t && !isNoisy(t)) {
-            blocks.push({ type: "paragraph", runs: [{ text: t }] });
-          }
+          if (t && !isNoisy(t)) blocks.push({ type: "paragraph", runs: [{ text: t }] });
           continue;
         }
         if (node.nodeType !== Node.ELEMENT_NODE) continue;
 
         const tag = node.tagName.toUpperCase();
-
-        // 跳过噪音
-        if (["BUTTON", "SVG", "MAT-ICON", "SCRIPT", "STYLE", "NAV", "ASIDE", "HEADER", "FOOTER"].includes(tag)) continue;
+        // 绝对不能跳过的正文关键路径
         if (node.classList?.contains("actions") || node.classList?.contains("actions-container") ||
           node.classList?.contains("turn-information") || node.classList?.contains("author-label") ||
-          node.classList?.contains("timestamp") || node.classList?.contains("token-count") ||
-          node.tagName === "MS-CHAT-TURN-OPTIONS") continue;
-        if (node.getAttribute("aria-hidden") === "true") continue;
+          node.getAttribute("aria-hidden") === "true") continue;
 
-        // 标题
         if (/^H([1-6])$/.test(tag)) {
-          const level = parseInt(tag[1]);
           const runs = mergeRuns(walkInline(node));
-          if (runs.length) blocks.push({ type: "heading", level, runs });
-          continue;
-        }
-
-        // 代码块
-        if (tag === "PRE") {
+          if (runs.length) blocks.push({ type: "heading", level: parseInt(tag[1]), runs });
+        } else if (tag === "PRE") {
           const codeEl = node.querySelector("code") || node;
           const lang = codeEl.className?.match(/language-(\w+)/)?.[1] || "";
           const text = (codeEl.textContent || "").replace(/\u00A0/g, " ");
-          if (text.trim()) blocks.push({ type: "code", text: text, language: lang });
-          continue;
-        }
-
-        // 如果 pre 在一个 code-block 容器内
-        if (node.querySelector("pre")) {
-          // 先抽取代码块之前的标签（可能有语言标签）
-          const label = node.querySelector(".code-block-decoration, .code-block-label, [class*='lang']");
-          const preEl = node.querySelector("pre");
-          const codeEl = preEl.querySelector("code") || preEl;
-          const lang = label?.textContent?.trim() || codeEl.className?.match(/language-(\w+)/)?.[1] || "";
-          const text = (codeEl.textContent || "").replace(/\u00A0/g, " ");
-          if (text.trim()) blocks.push({ type: "code", text: text, language: lang });
-          continue;
-        }
-
-        // 表格
-        if (tag === "TABLE") {
+          if (text.trim()) blocks.push({ type: "code", text, language: lang });
+        } else if (tag === "TABLE") {
           const rows = [];
-          node.querySelectorAll("tr").forEach((tr) => {
+          node.querySelectorAll("tr").forEach(tr => {
             const cells = [];
-            tr.querySelectorAll("td, th").forEach((td) => {
-              const runs = mergeRuns(walkInline(td));
-              cells.push({ runs, isHeader: td.tagName === "TH" });
-            });
+            tr.querySelectorAll("td, th").forEach(td => cells.push({ runs: mergeRuns(walkInline(td)), isHeader: td.tagName === "TH" }));
             if (cells.length) rows.push(cells);
           });
           if (rows.length) blocks.push({ type: "table", rows });
-          continue;
-        }
-
-        // 列表
-        if (tag === "UL" || tag === "OL") {
+        } else if (tag === "UL" || tag === "OL") {
           const ordered = tag === "OL";
-          let idx = 0;
-          node.querySelectorAll(":scope > li").forEach((li) => {
-            idx++;
-            const runs = mergeRuns(walkInline(li));
-            if (runs.length) {
-              blocks.push({ type: "list", ordered, index: idx, runs });
-            }
-            // 嵌套列表
-            const nested = li.querySelectorAll(":scope > ul > li, :scope > ol > li");
-            let subIdx = 0;
-            nested.forEach((sub) => {
-              subIdx++;
-              const subRuns = mergeRuns(walkInline(sub));
-              if (subRuns.length) {
-                blocks.push({ type: "list", ordered: sub.closest("ol") !== null, index: subIdx, nested: true, runs: subRuns });
-              }
-            });
+          // 关键修复：AI Studio 把 LI 包裹在 ms-cmark-node 等多层自定义组件里
+          // 必须用深层查询 "li" 而不是 ":scope > li"
+          // 同时排除嵌套列表的子 li（只处理第一层）
+          const allLIs = Array.from(node.querySelectorAll("li"));
+          // 过滤掉被嵌套 ul/ol 包含的 li（只取属于本层的）
+          const directLIs = allLIs.filter(li => {
+            const parentList = li.parentElement?.closest("ul, ol");
+            return parentList === node || parentList?.closest("ul, ol") === node;
           });
-          continue;
-        }
-
-        // 引用块
-        if (tag === "BLOCKQUOTE") {
-          const runs = mergeRuns(walkInline(node));
-          if (runs.length) blocks.push({ type: "blockquote", runs });
-          continue;
-        }
-
-        // 段落
-        if (tag === "P") {
-          const runs = mergeRuns(walkInline(node));
-          const plain = runs.map(r => r.text).join("").trim();
-          if (runs.length && !isNoisy(plain)) {
-            blocks.push({ type: "paragraph", runs });
-          }
-          continue;
-        }
-
-        // 分割线
-        if (tag === "HR") {
-          blocks.push({ type: "hr" });
-          continue;
-        }
-
-        // LI 直接出现？
-        if (tag === "LI") {
+          // 如果深查没结果，fallback 到所有 li
+          const targetLIs = directLIs.length > 0 ? directLIs : allLIs;
+          targetLIs.forEach((li, idx) => {
+            const runs = mergeRuns(walkInline(li));
+            if (runs.length) blocks.push({ type: "list", ordered, index: idx + 1, runs });
+          });
+        } else if (tag === "LI") {
+          // 兜底处理：不在 UL 内的孤立 LI
           const runs = mergeRuns(walkInline(node));
           if (runs.length) blocks.push({ type: "list", ordered: false, index: 1, runs });
-          continue;
-        }
-
-        // DIV / SPAN 等容器 — 递归
-        if (["DIV", "SPAN", "SECTION", "ARTICLE", "MS-PROMPT-CHUNK", "MS-CHAT-TURN-CHUNK"].includes(tag) ||
-          tag.startsWith("MS-")) {
+        } else if (tag === "BLOCKQUOTE") {
+          const runs = mergeRuns(walkInline(node));
+          if (runs.length) blocks.push({ type: "blockquote", runs });
+        } else if (tag === "P") {
+          const runs = mergeRuns(walkInline(node));
+          if (runs.length && !isNoisy(runs.map(r => r.text).join(""))) {
+            blocks.push({ type: "paragraph", runs });
+          }
+        } else {
+          // 关键：对于所有容器（DIV, SECTION, MS-*, SPAN等），永远进入内部递归，不做外部过滤
           walkBlock(node);
-          continue;
-        }
-
-        // 其他元素作为段落内联
-        const runs = mergeRuns(walkInline(node));
-        const plain = runs.map(r => r.text).join("").trim();
-        if (runs.length && !isNoisy(plain)) {
-          blocks.push({ type: "paragraph", runs });
         }
       }
     };
-
     walkBlock(root);
     return blocks;
   };
 
-  // ── 4. 提取对话轮次 ──
-  await autoScroll();
-
-  const main = document.querySelector("main") || document.body;
-  // 查找 ms-chat-turn 或各种可能的对话块类名
-  const turns = Array.from(main.querySelectorAll("ms-chat-turn, .chat-turn, .turn-outer-container, [role='listitem']"));
-  const conversation = [];
-
-  for (const turn of turns) {
-    // 获取角色 - 扩大检测范围
-    const roleContainer = turn.querySelector("[data-turn-role]") || turn;
-    const roleRaw = roleContainer.getAttribute("data-turn-role") || "";
-    const role = normalizeRole(roleRaw, turn);
-    if (!role) continue;
-
-    // 获取内容容器：支持 markdown 视图和普通 text 容器
-    const turnContent = turn.querySelector(".turn-content") ||
-      turn.querySelector("ms-markdown-view") ||
-      turn.querySelector(".model-response-text") ||
-      turn.querySelector(".prompt-text") ||
-      turn;
-
-    // 克隆并清除噪音元素（如按钮、图标、Token 数等）
-    const clone = turnContent.cloneNode(true);
-    clone.querySelectorAll(
-      ".author-label, .timestamp, .token-count, .actions, .actions-container, .turn-information, " +
-      "ms-chat-turn-options, button, svg, mat-icon, script, style, nav, .turn-footer, .copy-button"
-    ).forEach((el) => el.remove());
-
-    const contentBlocks = parseDomToBlocks(clone);
-
-    // 检查是否有实质内容
-    const hasValue = contentBlocks.some(b => {
-      if (b.type === "code" || b.type === "table") return true;
-      if (b.runs) return b.runs.some(r => r.text && r.text.trim().length > 0);
-      return false;
-    });
-
-    if (hasValue) {
-      conversation.push({ role, blocks: contentBlocks });
+  // ── 2. 边滚动边采集逻辑 ──
+  const findChatScrollContainer = () => {
+    const match = document.querySelector("ms-autoscroll-container, cdk-virtual-scroll-viewport");
+    if (match) return match;
+    const chatView = document.querySelector("ms-chat-view");
+    if (chatView) {
+      const scrollable = Array.from(chatView.querySelectorAll("div")).find(d => d.scrollHeight > d.clientHeight + 10);
+      if (scrollable) return scrollable;
     }
-  }
+    return document.scrollingElement;
+  };
 
-  // ── 5. Fallback: 如果 ms-chat-turn 没匹配到 ──
-  if (conversation.length === 0) {
-    // 尝试 aria-label 或其他标记
-    const allTurns = main.querySelectorAll("[data-turn-role], [role='listitem']");
-    for (const turn of allTurns) {
-      const roleRaw = turn.getAttribute("data-turn-role") || turn.getAttribute("aria-label") || "";
-      const role = normalizeRole(roleRaw);
-      if (!role) continue;
-      const contentBlocks = parseDomToBlocks(turn);
-      if (contentBlocks.length) conversation.push({ role, blocks: contentBlocks });
+  const sc = findChatScrollContainer();
+  const allCollectedTurns = []; // 严格按视觉先后顺序采集
+
+  if (sc) {
+    console.log("正在重置到对话顶部...");
+
+    const performReset = () => {
+      sc.scrollTop = 0;
+      if (sc.scrollTo) sc.scrollTo({ top: 0, behavior: 'instant' });
+      let parent = sc.parentElement;
+      while (parent && parent !== document.body) {
+        if (parent.scrollTop > 0) parent.scrollTop = 0;
+        parent = parent.parentElement;
+      }
+      window.scrollTo(0, 0);
+    };
+
+    // 强力归零校验循环 (确保从第一轮开始)
+    for (let r = 0; r < 10; r++) {
+      performReset();
+      await sleep(200);
+      if (sc.scrollTop < 5) break;
     }
-  }
+    console.log("[核心] 归零成功，同步中...");
+    await sleep(2000);
 
-  // ── 6. 最终 fallback：整个页面作为一个块 ──
-  if (conversation.length === 0) {
-    const contentBlocks = parseDomToBlocks(main);
-    if (contentBlocks.length) {
-      conversation.push({ role: "model", blocks: contentBlocks });
+    let lastScrollTop = -1;
+    let noMoveCount = 0;
+
+    // 步进式顺序扫描
+    for (let i = 0; i < 150; i++) {
+      // 提取视口快照并物理垂直排序
+      const currentSnapshot = Array.from(sc.querySelectorAll("ms-chat-turn, .chat-turn, .turn-outer-container"))
+        .filter(el => {
+          const rect = el.getBoundingClientRect();
+          const cRect = sc.getBoundingClientRect();
+          // 只采集高度足够且【其顶部已进入当前滚动视口】的内容
+          // 加上 rect.bottom > cRect.top 确保它没滚出视口顶端
+          return rect.height > 25 && rect.top < cRect.bottom - 5 && rect.bottom > cRect.top + 5;
+        })
+        .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top)
+        .map(turn => {
+          const roleContainer = turn.querySelector("[data-turn-role]") || turn;
+          const role = normalizeRole(roleContainer.getAttribute("data-turn-role"), turn);
+          if (!role) return null;
+
+          const turnContent = turn.querySelector(".turn-content") || turn.querySelector("ms-markdown-view") || turn;
+          const textSum = turnContent.textContent.trim();
+          if (!textSum) return null;
+
+          // 生成极其唯一的指纹 (首尾结合)
+          const finger = `${role}_${textSum.slice(0, 50)}_${textSum.slice(-50)}_${textSum.length}`;
+          return { finger, role, turnContent };
+        })
+        .filter(Boolean);
+
+      // 顺次接龙追加
+      for (const item of currentSnapshot) {
+        if (!allCollectedTurns.some(t => t.finger === item.finger)) {
+          const clone = item.turnContent.cloneNode(true);
+          // 清理 UI 元素、思考块、引用来源、搜索建议等
+          clone.querySelectorAll(".author-label, .timestamp, .token-count, .actions, button, svg, mat-icon, ms-thought-block, ms-collapsible-thought-block, .thought-container, .thought-content, ms-grounding-info, ms-search-suggestions").forEach(el => el.remove());
+
+          const contentBlocks = parseDomToBlocks(clone);
+          if (contentBlocks.length) {
+            allCollectedTurns.push({ finger: item.finger, role: item.role, blocks: contentBlocks });
+            console.log(`[同步进度] 已捕获 ${item.role} 消息 (总计: ${allCollectedTurns.length})`);
+          }
+        }
+      }
+
+      // 继续往下滚
+      lastScrollTop = sc.scrollTop;
+      sc.scrollTop += Math.floor(sc.clientHeight * 0.7); // 适度重叠以防漏词
+      await sleep(650); // 必须等待，确保虚拟列表稳定挂载
+
+      if (Math.abs(sc.scrollTop - lastScrollTop) < 3) {
+        if (++noMoveCount >= 3) break;
+      } else {
+        noMoveCount = 0;
+      }
     }
   }
 
   return {
     title: document.title || "AI Studio 对话",
     url: location.href,
-    conversation
+    conversation: allCollectedTurns
   };
 }
 
@@ -425,36 +342,46 @@ function buildDocxXml(payload) {
     }).join("");
   };
 
-  // ── 构建一个段落 ──
-  const addParagraph = (content, pPrExtra = "") => {
-    const pPr = pPrExtra ? `<w:pPr>${pPrExtra}</w:pPr>` : "";
+  // ── 构建一个段落 (严格遵守 OOXML 内部顺序规范) ──
+  const addParagraph = (content, opts = {}) => {
+    // 规范化的 pPr 顺序: pStyle -> (spacing -> ind -> jc) -> shd -> rPr
+    let pPrParts = "";
+    if (opts.spacing) pPrParts += opts.spacing;
+    if (opts.ind) pPrParts += opts.ind;
+    if (opts.jc) pPrParts += opts.jc;
+    if (opts.shd) pPrParts += opts.shd;
+    if (opts.rPr) pPrParts += `<w:rPr>${opts.rPr}</w:rPr>`;
+
+    const pPr = pPrParts ? `<w:pPr>${pPrParts}</w:pPr>` : "";
     paragraphs.push(`<w:p>${pPr}${content}</w:p>`);
   };
 
-  // ── 空行 ──
+  // ── 快捷样式方法 ──
   const addEmptyLine = () => {
-    addParagraph(runXml(""), '<w:spacing w:after="0" w:line="120" w:lineRule="auto"/>');
+    addParagraph(runXml(""), { spacing: '<w:spacing w:after="0" w:line="120" w:lineRule="auto"/>' });
   };
 
-  // ── 分割线 ──
   const addHorizontalRule = () => {
-    addParagraph("", '<w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="CCCCCC"/></w:pBdr><w:spacing w:after="100"/>');
+    addParagraph("", {
+      spacing: '<w:spacing w:after="100"/>',
+      shd: '<w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="CCCCCC"/></w:pBdr>' // 借用 Bdr 实现分割线
+    });
   };
 
   // ── 文档标题 ──
   const titleText = payload.title || "AI Studio 对话";
   addParagraph(
     runXml(titleText, { bold: true, fontSize: 36 }),
-    '<w:spacing w:after="200"/><w:jc w:val="center"/>'
+    { spacing: '<w:spacing w:after="200"/>', jc: '<w:jc w:val="center"/>' }
   );
   addParagraph(
     runXml(`导出时间：${new Date().toLocaleString("zh-CN")}`, { fontSize: 18, color: "888888" }),
-    '<w:spacing w:after="100"/><w:jc w:val="center"/>'
+    { spacing: '<w:spacing w:after="100"/>', jc: '<w:jc w:val="center"/>' }
   );
   if (payload.url) {
     addParagraph(
       runXml(payload.url, { fontSize: 16, color: "4472C4" }),
-      '<w:spacing w:after="200"/><w:jc w:val="center"/>'
+      { spacing: '<w:spacing w:after="200"/>', jc: '<w:jc w:val="center"/>' }
     );
   }
   addHorizontalRule();
@@ -470,7 +397,10 @@ function buildDocxXml(payload) {
     // 角色标题
     addParagraph(
       runXml(roleLabel, { bold: true, fontSize: 24, color: roleColor }),
-      `<w:spacing w:before="240" w:after="120"/><w:pBdr><w:bottom w:val="single" w:sz="8" w:space="4" w:color="${roleColor}"/></w:pBdr>`
+      {
+        spacing: '<w:spacing w:before="240" w:after="120"/>',
+        shd: `<w:pBdr><w:bottom w:val="single" w:sz="8" w:space="4" w:color="${roleColor}"/></w:pBdr>`
+      }
     );
 
     // 内容块
@@ -481,7 +411,7 @@ function buildDocxXml(payload) {
           const sz = sizeMap[block.level] || 26;
           addParagraph(
             runsXml(block.runs, { bold: true, fontSize: sz }),
-            `<w:spacing w:before="160" w:after="80"/>`
+            { spacing: `<w:spacing w:before="160" w:after="80"/>` }
           );
           break;
         }
@@ -489,7 +419,7 @@ function buildDocxXml(payload) {
         case "paragraph": {
           addParagraph(
             runsXml(block.runs),
-            '<w:spacing w:after="80" w:line="320" w:lineRule="auto"/>'
+            { spacing: '<w:spacing w:after="80" w:line="320" w:lineRule="auto"/>' }
           );
           break;
         }
@@ -499,7 +429,10 @@ function buildDocxXml(payload) {
           const indent = block.nested ? 720 : 360;
           addParagraph(
             runXml(bullet, { bold: false }) + runsXml(block.runs),
-            `<w:ind w:left="${indent}"/><w:spacing w:after="40" w:line="300" w:lineRule="auto"/>`
+            {
+              ind: `<w:ind w:left="${indent}" w:hanging="360"/>`,
+              spacing: '<w:spacing w:after="40" w:line="300" w:lineRule="auto"/>'
+            }
           );
           break;
         }
@@ -509,8 +442,12 @@ function buildDocxXml(payload) {
           if (block.language) {
             addParagraph(
               runXml(block.language.toUpperCase(), { fontSize: 18, color: "FFFFFF", bold: true }),
-              '<w:shd w:val="clear" w:color="auto" w:fill="3C3C3C"/><w:spacing w:after="0"/><w:ind w:left="180" w:right="180"/>' +
-              '<w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/></w:rPr>'
+              {
+                spacing: '<w:spacing w:after="0"/>',
+                ind: '<w:ind w:left="180" w:right="180"/>',
+                shd: '<w:shd w:val="clear" w:color="auto" w:fill="3C3C3C"/>',
+                rPr: '<w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/>'
+              }
             );
           }
           // 代码内容 — 按行拆分
@@ -520,10 +457,12 @@ function buildDocxXml(payload) {
             const spacingAfter = li === codeLines.length - 1 ? "100" : "0";
             addParagraph(
               runXml(line || " ", { code: false, fontSize: 20 }),
-              '<w:shd w:val="clear" w:color="auto" w:fill="F5F5F5"/>' +
-              `<w:spacing w:after="${spacingAfter}" w:line="260" w:lineRule="auto"/>` +
-              '<w:ind w:left="180" w:right="180"/>' +
-              '<w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas" w:cs="Consolas"/><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr>'
+              {
+                spacing: `<w:spacing w:after="${spacingAfter}" w:line="260" w:lineRule="auto"/>`,
+                ind: '<w:ind w:left="180" w:right="180"/>',
+                shd: '<w:shd w:val="clear" w:color="auto" w:fill="F5F5F5"/>',
+                rPr: '<w:rFonts w:ascii="Consolas" w:hAnsi="Consolas" w:cs="Consolas"/><w:sz w:val="20"/><w:szCs w:val="20"/>'
+              }
             );
           }
           break;
@@ -577,9 +516,11 @@ function buildDocxXml(payload) {
         case "blockquote": {
           addParagraph(
             runsXml(block.runs, { italic: true, color: "555555" }),
-            '<w:pBdr><w:left w:val="single" w:sz="12" w:space="8" w:color="CCCCCC"/></w:pBdr>' +
-            '<w:ind w:left="360"/><w:spacing w:after="80" w:line="300" w:lineRule="auto"/>' +
-            '<w:shd w:val="clear" w:color="auto" w:fill="FAFAFA"/>'
+            {
+              spacing: '<w:spacing w:after="80" w:line="300" w:lineRule="auto"/>',
+              ind: '<w:ind w:left="360"/>',
+              shd: '<w:pBdr><w:left w:val="single" w:sz="12" w:space="8" w:color="CCCCCC"/></w:pBdr><w:shd w:val="clear" w:color="auto" w:fill="FAFAFA"/>'
+            }
           );
           break;
         }
