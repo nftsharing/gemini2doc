@@ -90,7 +90,8 @@ async function extractConversation() {
       }
       if (node.nodeType !== Node.ELEMENT_NODE) return runs;
       const tag = node.tagName?.toUpperCase() || "";
-      if (["BUTTON", "SVG", "MAT-ICON", "SCRIPT", "STYLE", "NAV"].includes(tag)) return runs;
+      // UL/OL 交给 walkBlock 处理，walkInline 里跳过，防止嵌套列表文本被拼成一行
+      if (["BUTTON", "SVG", "MAT-ICON", "SCRIPT", "STYLE", "NAV", "UL", "OL"].includes(tag)) return runs;
       if (node.getAttribute("aria-hidden") === "true") return runs;
       const next = { ...inherited };
       if (tag === "STRONG" || tag === "B") next.bold = true;
@@ -135,7 +136,9 @@ async function extractConversation() {
 
         if (/^H([1-6])$/.test(tag)) {
           const runs = mergeRuns(walkInline(node));
-          if (runs.length) blocks.push({ type: "heading", level: parseInt(tag[1]), runs });
+          const headingText = runs.map(r => r.text).join("");
+          // 过滤掉 Google Search Suggestions 等噪音标题
+          if (runs.length && !isNoisy(headingText)) blocks.push({ type: "heading", level: parseInt(tag[1]), runs });
         } else if (tag === "PRE") {
           const codeEl = node.querySelector("code") || node;
           const lang = codeEl.className?.match(/language-(\w+)/)?.[1] || "";
@@ -150,22 +153,42 @@ async function extractConversation() {
           });
           if (rows.length) blocks.push({ type: "table", rows });
         } else if (tag === "UL" || tag === "OL") {
-          const ordered = tag === "OL";
-          // 关键修复：AI Studio 把 LI 包裹在 ms-cmark-node 等多层自定义组件里
-          // 必须用深层查询 "li" 而不是 ":scope > li"
-          // 同时排除嵌套列表的子 li（只处理第一层）
-          const allLIs = Array.from(node.querySelectorAll("li"));
-          // 过滤掉被嵌套 ul/ol 包含的 li（只取属于本层的）
-          const directLIs = allLIs.filter(li => {
-            const parentList = li.parentElement?.closest("ul, ol");
-            return parentList === node || parentList?.closest("ul, ol") === node;
-          });
-          // 如果深查没结果，fallback 到所有 li
-          const targetLIs = directLIs.length > 0 ? directLIs : allLIs;
-          targetLIs.forEach((li, idx) => {
-            const runs = mergeRuns(walkInline(li));
-            if (runs.length) blocks.push({ type: "list", ordered, index: idx + 1, runs });
-          });
+          // 递归处理列表，支持嵌套层级；depth=0 用实心圆，depth>0 用空心圆
+          const processListNode = (listEl, depth) => {
+            const isOrdered = listEl.tagName.toUpperCase() === "OL";
+            // 从直接子节点中找 LI，穿透 ms-cmark-node 等自定义容器，但不进入嵌套 UL/OL
+            const findDirectLIs = (container) => {
+              const result = [];
+              for (const child of container.childNodes) {
+                if (child.nodeType !== Node.ELEMENT_NODE) continue;
+                const ct = child.tagName.toUpperCase();
+                if (ct === "LI") {
+                  result.push(child);
+                } else if (ct !== "UL" && ct !== "OL") {
+                  result.push(...findDirectLIs(child));
+                }
+              }
+              return result;
+            };
+            const directLIs = findDirectLIs(listEl);
+            directLIs.forEach((li, idx) => {
+              const runs = mergeRuns(walkInline(li));
+              if (runs.length) blocks.push({ type: "list", ordered: isOrdered, index: idx + 1, runs, depth });
+              // 递归处理 LI 内的嵌套 UL/OL
+              const findNestedLists = (el) => {
+                for (const child of el.children) {
+                  const ct = child.tagName.toUpperCase();
+                  if (ct === "UL" || ct === "OL") {
+                    processListNode(child, depth + 1);
+                  } else if (ct !== "LI") {
+                    findNestedLists(child);
+                  }
+                }
+              };
+              findNestedLists(li);
+            });
+          };
+          processListNode(node, 0);
         } else if (tag === "LI") {
           // 兜底处理：不在 UL 内的孤立 LI
           const runs = mergeRuns(walkInline(node));
@@ -261,7 +284,7 @@ async function extractConversation() {
         if (!allCollectedTurns.some(t => t.finger === item.finger)) {
           const clone = item.turnContent.cloneNode(true);
           // 清理 UI 元素、思考块、引用来源、搜索建议等
-          clone.querySelectorAll(".author-label, .timestamp, .token-count, .actions, button, svg, mat-icon, ms-thought-block, ms-collapsible-thought-block, .thought-container, .thought-content, ms-grounding-info, ms-search-suggestions").forEach(el => el.remove());
+          clone.querySelectorAll(".author-label, .timestamp, .token-count, .actions, button, svg, mat-icon, ms-thought-chunk, ms-thought-block, ms-collapsible-thought-block, .thought-container, .thought-content, ms-grounding-info, ms-grounding-chunk, ms-grounding-metadata, ms-search-suggestions, ms-search-suggestion, ms-grounding-web-search-queries, .grounding-panel, .search-suggestions-container").forEach(el => el.remove());
 
           const contentBlocks = parseDomToBlocks(clone);
           if (contentBlocks.length) {
@@ -376,15 +399,8 @@ function buildDocxXml(payload) {
   );
   addParagraph(
     runXml(`导出时间：${new Date().toLocaleString("zh-CN")}`, { fontSize: 18, color: "888888" }),
-    { spacing: '<w:spacing w:after="100"/>', jc: '<w:jc w:val="center"/>' }
+    { spacing: '<w:spacing w:after="200"/>', jc: '<w:jc w:val="center"/>' }
   );
-  if (payload.url) {
-    addParagraph(
-      runXml(payload.url, { fontSize: 16, color: "4472C4" }),
-      { spacing: '<w:spacing w:after="200"/>', jc: '<w:jc w:val="center"/>' }
-    );
-  }
-  addHorizontalRule();
   addEmptyLine();
 
   // ── 遍历对话 ──
@@ -425,12 +441,14 @@ function buildDocxXml(payload) {
         }
 
         case "list": {
-          const bullet = block.ordered ? `${block.index}. ` : "• ";
-          const indent = block.nested ? 720 : 360;
+          const depth = block.depth || 0;
+          // depth=0: 实心圆 •，depth>0: 空心圆 ○，有序列表用数字
+          const bullet = block.ordered ? `${block.index}. ` : (depth > 0 ? "\u25CB " : "\u2022 ");
+          const indentLeft = 360 + depth * 360; // 每级缩进 360 twips (~0.25英寸)
           addParagraph(
             runXml(bullet, { bold: false }) + runsXml(block.runs),
             {
-              ind: `<w:ind w:left="${indent}" w:hanging="360"/>`,
+              ind: `<w:ind w:left="${indentLeft + 360}" w:hanging="360"/>`,
               spacing: '<w:spacing w:after="40" w:line="300" w:lineRule="auto"/>'
             }
           );
