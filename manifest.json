@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Gemini to DOCX",
-  "version": "2.0.0",
+  "version": "2.2.0",
   "description": "将 Gemini 对话内容导出为格式精美的 DOCX 文档",
   "permissions": ["tabs", "scripting", "downloads", "activeTab"],
   "host_permissions": ["<all_urls>"],
