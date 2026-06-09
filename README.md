@@ -53,7 +53,7 @@ Currently, the extension can be installed in developer mode:
 1. 打开 Chrome 浏览器，在地址栏输入：`chrome://extensions/`
 2. 打开右上角的 **"开发者模式"** 开关。
 3. 点击左上角的 **"加载已解压的扩展程序"**。
-4. 选择包含此插件代码的文件夹。
+4. 选择包含此插件代码的文件夹。 
 5. 安装完成！此时可以关闭"开发者模式"。
 
 ### 🚀 使用说明
