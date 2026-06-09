@@ -1,10 +1,11 @@
-# AI Studio to DOCX 使用说明
+# Gemini to DOCX 使用说明
 
-`AI Studio to DOCX（V2.0）` 是一个 Chrome 浏览器扩展，能将 AI Studio（aistudio.google.com）的对话内容完整导出为格式精美的 `.docx` 文档。
+`Gemini to DOCX（V3.0）` 是一个 Chrome 浏览器扩展，能将 Gemini（gemini.google.com）的对话内容完整导出为格式精美的 `.docx` 文档。
 
 ## ✨ 功能特色
 
 - **完整对话导出**：自动滚动页面，抓取所有对话轮次（用户问题 + AI 回答）
+- 可选择是否去除引用
 
 ## 📦 安装（仅需一次）
 
@@ -16,10 +17,10 @@
 
 ## 🚀 使用方法
 
-1. 打开 AI Studio 聊天页面
+1. 打开 Gemini 聊天页面
 2. 确保对话内容已加载完毕
-3. 点击浏览器工具栏中的扩展图标（或从扩展菜单中选择 `AI Studio to DOCX`）
-4. 在弹出窗口中选择要导出的标签页（AI Studio 标签会带 ⭐ 标记）
+3. 点击浏览器工具栏中的扩展图标（或从扩展菜单中选择 `Gemini to DOCX`）
+4. 在弹出窗口中选择要导出的标签页（Gemini 标签会带 ⭐ 标记）
 5. 点击 **"📄 导出 DOCX"**
 6. 选择保存位置，完成！
 
@@ -27,5 +28,5 @@
 
 代码更新后：
 1. 打开 `chrome://extensions/`
-2. 找到 `AI Studio to DOCX`
+2. 找到 `Gemini to DOCX`
 3. 点击 **刷新** 按钮即可

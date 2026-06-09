@@ -1,6 +1,6 @@
 /* ============================================================
- *  AI Studio to DOCX - Chrome Extension
- *  v2.0 — 完整保留 AI Studio 对话格式并导出为 DOCX
+ *  Gemini to DOCX - Chrome Extension
+ *  v2.1 — 修复了 Word 打开时提示“无读取内容”的格式兼容性问题
  * ============================================================ */
 
 // ─── UI 元素 ───────────────────────────────────────────────────
@@ -16,8 +16,8 @@ function setStatus(text, type = "info") {
 
 // ─── 辅助函数 ──────────────────────────────────────────────────
 function sanitizeFilename(name) {
-  return (name || "AI_Studio_对话")
-    .replace(/\s*[_|-]\s*Google AI Studio$/i, "") // 移除标题后的 " - Google AI Studio"
+  return (name || "Gemini_对话")
+    .replace(/\s*[_|-]\s*Gemini$/i, "") // 移除标题后的 " - Gemini"
     .replace(/[\\/:\*\?"<>|]/g, "_")
     .replace(/\s+/g, " ")
     .trim()
@@ -53,9 +53,13 @@ async function extractConversation() {
   const normalizeRole = (raw, element) => {
     let v = String(raw || "").toLowerCase();
     if (!v && element) {
+      const tag = element.tagName ? element.tagName.toLowerCase() : "";
+      if (tag === "user-query" || tag === "user-message") v = "user";
+      else if (tag === "model-response" || tag === "model-message") v = "model";
+
       const cls = element.className || "";
-      if (/user/i.test(cls) || element.querySelector(".user-avatar, .user-icon")) v = "user";
-      else if (/model|assistant|gemini/i.test(cls) || element.querySelector(".model-avatar, .model-icon, .gemini-icon")) v = "model";
+      if (/user/i.test(cls) || element.querySelector(".user-avatar, .user-icon, user-avatar")) v = "user";
+      else if (/model|assistant|gemini/i.test(cls) || element.querySelector(".model-avatar, .model-icon, .gemini-icon, model-avatar")) v = "model";
     }
     if (/user|human|用户/.test(v)) return "user";
     if (/model|assistant|gemini|模型/.test(v)) return "model";
@@ -73,7 +77,8 @@ async function extractConversation() {
       /^Sources$/i,
       /^Google Search Suggestions$/i,
       /Display of Search Suggestions is required/i,
-      /^(User|Model)\s*[•·]\s*\d{1,2}:\d{2}/i
+      /^(User|Model)\s*[•·]\s*\d{1,2}:\d{2}/i,
+      /^(你说[：:]?|You said:?)$/i
     ];
     return noisePatterns.some(p => p.test(t));
   };
@@ -84,7 +89,8 @@ async function extractConversation() {
       const runs = [];
       if (!node) return runs;
       if (node.nodeType === Node.TEXT_NODE) {
-        const t = (node.nodeValue || "").replace(/\u00A0/g, " ");
+        // 过滤掉HTML中无意义的换行和制表符（防止引起 w:t 标签内部含非法换行符导致 Word 崩溃）
+        const t = (node.nodeValue || "").replace(/[\r\n\t]+/g, " ").replace(/\u00A0/g, " ");
         if (t) runs.push({ text: t, ...inherited });
         return runs;
       }
@@ -97,7 +103,8 @@ async function extractConversation() {
       if (tag === "STRONG" || tag === "B") next.bold = true;
       if (tag === "EM" || tag === "I") next.italic = true;
       if (tag === "CODE" && !["PRE"].includes(node.parentElement?.tagName?.toUpperCase())) next.code = true;
-      if (tag === "A" && node.href) next.link = node.href;
+      // 强力过滤非标准链接（如 blob:, javascript:, data: 等），这些会直接让 Word DOCX.rels 解析彻底崩溃
+      if (tag === "A" && node.href && /^https?:\/\//i.test(node.href)) next.link = node.href;
       for (const child of node.childNodes) runs.push(...walkInline(child, next));
       return runs;
     };
@@ -122,7 +129,7 @@ async function extractConversation() {
       if (!container) return;
       for (const node of container.childNodes) {
         if (node.nodeType === Node.TEXT_NODE) {
-          const t = (node.nodeValue || "").trim();
+          const t = (node.nodeValue || "").replace(/[\r\n\t]+/g, " ").trim();
           if (t && !isNoisy(t)) blocks.push({ type: "paragraph", runs: [{ text: t }] });
           continue;
         }
@@ -213,13 +220,33 @@ async function extractConversation() {
 
   // ── 2. 边滚动边采集逻辑 ──
   const findChatScrollContainer = () => {
-    const match = document.querySelector("ms-autoscroll-container, cdk-virtual-scroll-viewport");
-    if (match) return match;
-    const chatView = document.querySelector("ms-chat-view");
+    // 按优先级顺序查找，防止侧边栏的通用组件被提前匹配
+    const selectors = [
+      "infinite-scroller.chat-history", // Gemini 正文容器
+      "ms-autoscroll-container",        // AI Studio 容器
+      ".conversation-container",
+      "ms-chat-view",
+      "chat-app",
+      "cdk-virtual-scroll-viewport",    // Angular 通用虚拟列表
+      "infinite-scroller",              // 其他通用滚动列表 
+      ".infinite-scroller",
+      "message-list"
+    ];
+    
+    for (const sel of selectors) {
+      const el = document.querySelector(sel);
+      if (el && el.scrollHeight > el.clientHeight) return el; // 确保是真的可滚动
+    }
+
+    // 兜底寻找带有足够滚动空间的 div
+    const chatView = document.querySelector("ms-chat-view, chat-app, .conversation-container");
     if (chatView) {
       const scrollable = Array.from(chatView.querySelectorAll("div")).find(d => d.scrollHeight > d.clientHeight + 10);
       if (scrollable) return scrollable;
     }
+    const mainScrollable = Array.from(document.querySelectorAll("div")).find(d => d.scrollHeight > d.clientHeight + 500 && d.clientHeight > 300);
+    if (mainScrollable) return mainScrollable;
+    
     return document.scrollingElement;
   };
 
@@ -254,11 +281,10 @@ async function extractConversation() {
 
     // 步进式顺序扫描
     for (let i = 0; i < 150; i++) {
-      // 提取视口快照并物理垂直排序
-      const currentSnapshot = Array.from(sc.querySelectorAll("ms-chat-turn, .chat-turn, .turn-outer-container"))
+      const currentSnapshot = Array.from(document.querySelectorAll("infinite-scroller.chat-history user-query, infinite-scroller.chat-history model-response, ms-chat-turn, .chat-turn, .turn-outer-container, message-content, [data-message-author], .conversation-turn"))
         .filter(el => {
           const rect = el.getBoundingClientRect();
-          const cRect = sc.getBoundingClientRect();
+          const cRect = sc === document.scrollingElement || sc === document.documentElement || sc === document.body ? { top: 0, bottom: window.innerHeight } : sc.getBoundingClientRect();
           // 只采集高度足够且【其顶部已进入当前滚动视口】的内容
           // 加上 rect.bottom > cRect.top 确保它没滚出视口顶端
           return rect.height > 25 && rect.top < cRect.bottom - 5 && rect.bottom > cRect.top + 5;
@@ -269,7 +295,8 @@ async function extractConversation() {
           const role = normalizeRole(roleContainer.getAttribute("data-turn-role"), turn);
           if (!role) return null;
 
-          const turnContent = turn.querySelector(".turn-content") || turn.querySelector("ms-markdown-view") || turn;
+          // 对 Gemini 的内容提取进一步精确化，防止提偏
+          const turnContent = turn.querySelector(".turn-content, response-content, ms-markdown-view, .model-response-text, message-content, .query-content, .query-text, user-query-content") || turn;
           const textSum = turnContent.textContent.trim();
           if (!textSum) return null;
 
@@ -285,6 +312,15 @@ async function extractConversation() {
           const clone = item.turnContent.cloneNode(true);
           // 清理 UI 元素、思考块、引用来源、搜索建议等
           clone.querySelectorAll(".author-label, .timestamp, .token-count, .actions, button, svg, mat-icon, ms-thought-chunk, ms-thought-block, ms-collapsible-thought-block, .thought-container, .thought-content, ms-grounding-info, ms-grounding-chunk, ms-grounding-metadata, ms-search-suggestions, ms-search-suggestion, ms-grounding-web-search-queries, .grounding-panel, .search-suggestions-container").forEach(el => el.remove());
+
+          // 专门消灭页面中作为标识位存在，且没有特定 class 的孤立文本“你说”
+          const walkTextNodes = document.createTreeWalker(clone, NodeFilter.SHOW_TEXT, null, false);
+          let n;
+          while (n = walkTextNodes.nextNode()) {
+            if (/^(你说[：:]?|You said:?)$/i.test((n.nodeValue || "").trim())) {
+              n.nodeValue = "";
+            }
+          }
 
           const contentBlocks = parseDomToBlocks(clone);
           if (contentBlocks.length) {
@@ -308,7 +344,7 @@ async function extractConversation() {
   }
 
   return {
-    title: document.title || "AI Studio 对话",
+    title: document.title || "Gemini 对话",
     url: location.href,
     conversation: allCollectedTurns
   };
@@ -468,10 +504,11 @@ function buildDocxXml(payload) {
               }
             );
           }
-          // 代码内容 — 按行拆分
-          const codeLines = (block.text || "").split("\n");
+          // 代码内容 — 按行拆分，兼容 \r\n 并剔除残留 \r
+          const codeLines = (block.text || "").split(/\r?\n/);
           for (let li = 0; li < codeLines.length; li++) {
-            const line = codeLines[li];
+            // 注意：保留了 \t (制表符) 以免破坏代码缩进，只过滤会破坏 Word 的 \r、\n 及其它控制符
+            const line = codeLines[li].replace(/[\r\n\x00-\x08\x0b-\x1f\x7f]/g, "");
             const spacingAfter = li === codeLines.length - 1 ? "100" : "0";
             addParagraph(
               runXml(line || " ", { code: false, fontSize: 20 }),
@@ -746,15 +783,15 @@ async function loadTabs() {
   for (const tab of valid) {
     const opt = document.createElement("option");
     opt.value = String(tab.id);
-    // 优先显示 AI Studio 相关标签
+    // 优先显示 Gemini 相关标签
     const isAI = /aistudio|gemini|chatgpt|claude/i.test(tab.url);
     opt.textContent = `${isAI ? "⭐ " : ""}${tab.title || "无标题"}`;
     if (isAI) opt.style.fontWeight = "bold";
     tabSelect.appendChild(opt);
   }
 
-  // 自动选中 AI Studio 标签
-  const aiTab = valid.find(t => /aistudio\.google\.com/i.test(t.url));
+  // 自动选中 Gemini 标签
+  const aiTab = valid.find(t => /gemini\.google\.com/i.test(t.url));
   if (aiTab) tabSelect.value = String(aiTab.id);
 
   if (!valid.length) {
@@ -787,7 +824,7 @@ async function runExport() {
 
     const payload = result?.result;
     if (!payload || !Array.isArray(payload.conversation) || payload.conversation.length === 0) {
-      throw new Error("未提取到对话内容。\n请确认：\n1. 已选择正确的 AI Studio 标签页\n2. 页面已完全加载\n3. 页面上有可见的对话内容");
+      throw new Error("未提取到对话内容。\n请确认：\n1. 已选择正确的 Gemini 标签页\n2. 页面已完全加载\n3. 页面上有可见的对话内容");
     }
 
     setStatus(`提取到 ${payload.conversation.length} 条对话，正在生成 DOCX...`, "working");
